@@ -12,8 +12,8 @@ OpenFOAM's own to rounding error, and export it in the shape your model expects.
 touching the wall are tagged. Right: the converged pressure field on the nodes. Made with
 [`examples/plot_graph.py`](examples/plot_graph.py).*
 
-> **Status: early development (0.1.0.dev0).** Reading, mesh geometry and graph export work and are tested
-> against OpenFOAM. Grid export for neural operators is next — see the roadmap.
+> **Status: early development (0.1.0.dev0).** Reading, mesh geometry, graph export and 2D grid export work and
+> are tested against OpenFOAM. Datasets over parameter sweeps and a CLI are next — see the roadmap.
 
 ## Quickstart: a case to a PyTorch Geometric graph
 
@@ -35,6 +35,34 @@ g.save("case_000.npz")            # or keep it framework-free: plain NumPy array
 - **2D meshes are handled properly.** OpenFOAM's 2D cases are one cell thick with an arbitrary depth; foam2ml
   drops the out-of-plane axis and divides by the depth, so areas and face lengths don't depend on a meaningless number.
 - PyTorch is optional: `pip install "foam2ml[pyg]"` only if you want `to_pyg()`.
+
+## Quickstart: a case to an FNO-ready grid
+
+```python
+from foam2ml import Case, patch_bounds, to_grid
+
+case = Case("airFoil2D")
+gs = to_grid(case, fields=["U", "p"], shape=(256, 128),
+             bounds=patch_bounds(case.mesh, "walls", pad=0.6))   # crop around the airfoil
+gs            # GridSample(shape=(256, 128), fluid=96.0%, x=['mask', 'sdf', 'pos_x', 'pos_y'], y=['U_x', 'U_y', 'p'])
+
+x, y = gs.to_torch()          # (4, 256, 128) inputs, (3, 256, 128) targets — add a batch dim for an FNO
+# model_output: your FNO's (3, 256, 128) prediction — score it on the real mesh, not the pixels
+pred_on_mesh = gs.sample(model_output, case.mesh.cell_centres[:, :2])
+```
+
+![airFoil2D resampled for an FNO](docs/airfoil_grid.png)
+
+- **No interpolating through walls.** Every grid point is located inside the actual mesh cell that contains it;
+  points in no cell get `mask = 0`. Homemade converters built on nearest-neighbour or `griddata` blend values
+  across thin bodies — foam2ml can't, by construction.
+- **Finite-volume linear reconstruction** within each cell (cell value plus a least-squares gradient over its face
+  neighbours), exact for linear fields. `method="cell"` gives the raw piecewise-constant solution instead.
+- **Inputs an FNO needs:** a fluid mask and a signed distance to the walls (positive in fluid, negative in solid),
+  plus coordinates. Targets are zero in solid pixels.
+- **Back to the mesh:** `gs.sample()` bilinearly samples a grid prediction at cell centres, so you can compute
+  errors on the true mesh rather than on the pixels.
+- 2D (one-cell-thick) meshes for now; 3D raises a clear error.
 
 ## What works today
 
@@ -72,6 +100,8 @@ The test suite compares against **OpenFOAM's own output**, not against itself:
   when OpenFOAM is installed — meshes where a naive vertex-average centre would be visibly wrong
 - Graph edges are checked for consistency: displacements match node positions, normals are unit length and
   point across every face, including on airFoil2D's curved, stretched cells, and a GNN forward pass runs on the output
+- Grid export: all 10,720 airFoil2D cell centres locate to their own cell; a linear field is reproduced to
+  ~1e-13 on every fluid pixel; the signed distance matches the closed form on the cavity exactly
 - Every cell's outward face-area vectors sum to zero (the divergence theorem), confirming closed, consistently
   oriented cells
 
@@ -86,8 +116,9 @@ pytest                    # live OpenFOAM comparisons run automatically if OpenF
 - [x] Mesh geometry matching OpenFOAM
 - [x] **Graph export** — cells as nodes, internal faces as edges, boundary patches tagged; NumPy `.npz` or PyG `Data`
 - [ ] Boundary-face nodes carrying boundary-condition values (inlet velocity, wall), for models that need them
-- [ ] **Grid export for neural operators** — resample onto a regular grid with a geometry mask channel,
-      so an FNO can tell solid from fluid
+- [x] **Grid export for neural operators (2D)** — point location in true mesh cells, FV linear reconstruction,
+      mask and signed-distance channels, sampling back to the mesh
+- [ ] Grid export for 3D meshes
 - [ ] **Datasets** — a folder of cases (parameter sweeps) into one dataset, case parameters attached,
       dataset-level normalisation statistics saved
 - [ ] CLI: `foam2ml convert ./cases --to pyg | grid`
