@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "foam2ml"
+dynamic = ["version"]
+description = "Turn OpenFOAM cases into machine-learning-ready graphs and grids"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Aditya Kumar Meshram" }]
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.23"]
+keywords = ["openfoam", "cfd", "machine-learning", "graph-neural-networks", "neural-operators", "surrogate-models"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.urls]
+Repository = "https://github.com/meshram1/foam2ml"
+
+[tool.hatch.version]
+path = "src/foam2ml/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/foam2ml"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["tests/data"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
