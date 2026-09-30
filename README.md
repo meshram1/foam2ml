@@ -1,128 +1,124 @@
 # foam2ml
 
-**Turn OpenFOAM cases into machine-learning-ready data** — graphs for GNNs, regular grids for neural operators.
-
-Every ML-for-CFD project ends up writing its own throwaway OpenFOAM reader. foam2ml is meant to be the one you
-install instead: read a case directory directly (no `foamToVTK` step), get mesh geometry that agrees with
-OpenFOAM's own to rounding error, and export it in the shape your model expects.
+Turn OpenFOAM cases into machine-learning-ready data: graphs for graph neural networks, and regular grids for
+neural operators such as FNOs.
 
 ![airFoil2D as a graph](docs/airfoil_graph.png)
 
-*OpenFOAM's airFoil2D tutorial through `to_graph()`: every cell is a node, every internal face an edge, and cells
-touching the wall are tagged. Right: the converged pressure field on the nodes. Made with
-[`examples/plot_graph.py`](examples/plot_graph.py).*
+## Install
 
-> **Status: early development (0.1.0.dev0).** Reading, mesh geometry, graph export and 2D grid export work and
-> are tested against OpenFOAM. Datasets over parameter sweeps and a CLI are next — see the roadmap.
-
-## Quickstart: a case to a PyTorch Geometric graph
-
-```python
-from foam2ml import to_graph
-
-g = to_graph("airFoil2D", fields=["U", "p"], params={"aoa": 4.0})
-g            # Graph(nodes=10720, edges=42508, x=['pos_x', 'pos_y', 'area', 'on_inlet', 'on_outlet', 'on_walls'],
-             #       y=['U_x', 'U_y', 'p'], edge_attr=['dx', 'dy', 'dist', 'length', 'n_x', 'n_y'], params={'aoa': 4.0})
-
-data = g.to_pyg()                 # torch_geometric.data.Data — ready for any PyG model
-g.save("case_000.npz")            # or keep it framework-free: plain NumPy arrays plus column names
+```bash
+pip install git+https://github.com/meshram1/foam2ml
+pip install "foam2ml[pyg] @ git+https://github.com/meshram1/foam2ml"   # with PyTorch Geometric export
 ```
 
-- **Nodes** are cells. `x` holds the model's inputs — position, cell area/volume, and a 0/1 tag per boundary
-  patch — and `y` holds the fields you want to predict. Every column is named (`x_names`, `y_names`).
-- **Edges** are internal faces, both directions by default, with features `[d, distance, face length/area, unit normal]`.
-  Normals always point from source to target cell.
-- **2D meshes are handled properly.** OpenFOAM's 2D cases are one cell thick with an arbitrary depth; foam2ml
-  drops the out-of-plane axis and divides by the depth, so areas and face lengths don't depend on a meaningless number.
-- PyTorch is optional: `pip install "foam2ml[pyg]"` only if you want `to_pyg()`.
+Requires Python 3.9+ and NumPy. OpenFOAM does not need to be installed to read cases.
 
-## Quickstart: a case to an FNO-ready grid
+## Read a case
+
+```python
+from foam2ml import Case
+
+case = Case("cavity")              # path to an OpenFOAM case directory
+case.times()                       # ['0', '0.1', ..., '0.5']
+case.field_names()                 # ['U', 'p', ...] at the latest time
+
+U = case.field("U")                # (n_cells, 3) at the latest time
+p = case.field("p", "0.1")         # (n_cells,) at time 0.1
+case.read("U").boundary            # per-patch boundary types and values
+
+mesh = case.mesh
+mesh.cell_centres                  # (n_cells, 3)
+mesh.cell_volumes                  # (n_cells,)
+mesh.face_centres, mesh.face_areas # (n_faces, 3); area vectors point out of the owner cell
+mesh.cell_adjacency()              # (2, n_internal_faces) pairs of cells sharing a face
+mesh.patch_cells("movingWall")     # cells next to a boundary patch
+mesh.is_2d, mesh.normal_axis       # one-cell-thick 2D meshes are detected automatically
+```
+
+Reads `constant/polyMesh` (classic and compact face formats) and volume fields (uniform or non-uniform, with
+boundary values) straight from the case directory. Mesh geometry is computed with OpenFOAM's own algorithms and
+matches its output to rounding error.
+
+## Export a graph
+
+```python
+from foam2ml import Graph, to_graph
+
+g = to_graph("airFoil2D", fields=["U", "p"], params={"aoa": 4.0})
+# Graph(nodes=10720, edges=42508,
+#       x=['pos_x', 'pos_y', 'area', 'on_inlet', 'on_outlet', 'on_walls'],
+#       y=['U_x', 'U_y', 'p'],
+#       edge_attr=['dx', 'dy', 'dist', 'length', 'n_x', 'n_y'], params={'aoa': 4.0})
+
+data = g.to_pyg()                  # torch_geometric.data.Data
+g.save("case_000.npz")             # plain NumPy arrays plus column names
+g = Graph.load("case_000.npz")
+g.column("p")                      # any column by name
+```
+
+- **Nodes** are cells. `x` holds inputs (position, cell area or volume, a 0/1 tag for each boundary patch) and `y`
+  holds the requested fields.
+- **Edges** are internal faces, in both directions, with displacement, distance, face length (2D) or area (3D),
+  and the unit face normal pointing from source to target.
+- **2D meshes** drop the out-of-plane axis, and areas and lengths are divided by the mesh depth.
+
+| Option | Default | Effect |
+|---|---|---|
+| `fields` | `()` | fields to put in `y` |
+| `time` | latest | time directory to read |
+| `params` | `{}` | case-level values stored on the graph, e.g. angle of attack |
+| `patch_tags` | `"name"` | one tag column per patch name, `"type"` per patch type, or `"none"` |
+| `include_volume` | `True` | add cell area/volume to `x` |
+| `bidirectional` | `True` | include both directions of each face |
+
+## Export an FNO grid
 
 ```python
 from foam2ml import Case, patch_bounds, to_grid
 
 case = Case("airFoil2D")
 gs = to_grid(case, fields=["U", "p"], shape=(256, 128),
-             bounds=patch_bounds(case.mesh, "walls", pad=0.6))   # crop around the airfoil
-gs            # GridSample(shape=(256, 128), fluid=96.0%, x=['mask', 'sdf', 'pos_x', 'pos_y'], y=['U_x', 'U_y', 'p'])
+             bounds=patch_bounds(case.mesh, "walls", pad=0.6))
+# GridSample(shape=(256, 128), fluid=96.0%, x=['mask', 'sdf', 'pos_x', 'pos_y'], y=['U_x', 'U_y', 'p'])
 
-x, y = gs.to_torch()          # (4, 256, 128) inputs, (3, 256, 128) targets — add a batch dim for an FNO
-# model_output: your FNO's (3, 256, 128) prediction — score it on the real mesh, not the pixels
-pred_on_mesh = gs.sample(model_output, case.mesh.cell_centres[:, :2])
+x, y = gs.to_torch()               # (4, 256, 128) inputs, (3, 256, 128) targets
+gs.channel("p")                    # any channel by name, shape (256, 128)
+on_mesh = gs.sample(prediction, case.mesh.cell_centres[:, :2])   # grid prediction back to cell centres
+gs.save("case_000.npz")
 ```
 
 ![airFoil2D resampled for an FNO](docs/airfoil_grid.png)
 
-- **No interpolating through walls.** Every grid point is located inside the actual mesh cell that contains it;
-  points in no cell get `mask = 0`. Homemade converters built on nearest-neighbour or `griddata` blend values
-  across thin bodies — foam2ml can't, by construction.
-- **Finite-volume linear reconstruction** within each cell (cell value plus a least-squares gradient over its face
-  neighbours), exact for linear fields. `method="cell"` gives the raw piecewise-constant solution instead.
-- **Inputs an FNO needs:** a fluid mask and a signed distance to the walls (positive in fluid, negative in solid),
-  plus coordinates. Targets are zero in solid pixels.
-- **Back to the mesh:** `gs.sample()` bilinearly samples a grid prediction at cell centres, so you can compute
-  errors on the true mesh rather than on the pixels.
-- 2D (one-cell-thick) meshes for now; 3D raises a clear error.
+- Each pixel takes its value from the mesh cell that contains it, so values never cross a solid body.
+  Pixels outside every cell have `mask = 0` and zero targets.
+- Inputs: `mask` (1 = fluid), `sdf` (signed distance to the walls: positive in fluid, negative in solid) and the
+  pixel coordinates.
+- Arrays are channel-first with `[channel, i, j]` indexing, `i` along x and `j` along y. To plot with matplotlib,
+  use `imshow(gs.channel("p").T, origin="lower")`.
+- `locate_points(mesh, points)` returns the cell containing any set of points, or -1.
 
-## What works today
+| Option | Default | Effect |
+|---|---|---|
+| `fields` | `()` | field names, or a dict `{name: cell array}` of your own data |
+| `shape` | `(128, 128)` | pixels along the two in-plane axes |
+| `bounds` | whole mesh | `((xmin, xmax), (ymin, ymax))`; `patch_bounds(mesh, patch, pad)` crops around a body |
+| `method` | `"linear"` | `"linear"` (cell value plus least-squares gradient) or `"cell"` (piecewise constant) |
+| `walls` | all `wall` patches | patches the `sdf` channel measures to; `[]` removes it |
+| `params` | `{}` | case-level values stored on the sample |
 
-```python
-from foam2ml import Case
+Grid export supports 2D (one-cell-thick) meshes.
 
-case = Case("cavity")
-case.mesh                 # Mesh(2D (normal axis z): 400 cells, 1640 faces (760 internal), 882 points, ...)
-case.times()              # ['0', '0.1', ..., '0.5']
+## Examples
 
-U = case.field("U")       # (400, 3) cell values at the latest time
-p = case.field("p", "0.1")
+- [`examples/plot_graph.py`](examples/plot_graph.py) — draws a case's graph and a field on its nodes
+- [`examples/plot_grid.py`](examples/plot_grid.py) — draws a case's grid channels
 
-mesh = case.mesh
-mesh.cell_centres         # (400, 3) — identical to OpenFOAM's writeCellCentres
-mesh.cell_volumes         # (400,)
-mesh.face_areas           # (1640, 3) area vectors, pointing out of the owner cell
-mesh.cell_adjacency()     # (2, 760) cell pairs joined by internal faces — the graph's edges
-mesh.patch_cells("movingWall")
-```
-
-- Reads `points`, `faces` (classic and compact formats), `owner`, `neighbour`, `boundary`
-- Reads volume fields: uniform or non-uniform `internalField`, and per-patch boundary types and values
-- Computes face centres and area vectors, and cell centres and volumes, with OpenFOAM's own algorithms
-- Detects OpenFOAM's one-cell-thick 2D meshes (`empty` patches) and their normal axis
-- Pure Python + NumPy, no OpenFOAM installation needed to read cases
-
-## How it's validated
-
-The test suite compares against **OpenFOAM's own output**, not against itself:
-
-- Cell centres and volumes match OpenFOAM's `writeCellCentres` / `writeCellVolumes` (written at 17 digits)
-  on the lid-driven cavity, which ships with the tests
-- The same comparison runs live on the graded **pitzDaily** mesh and the curved, stretched **airFoil2D** mesh
-  when OpenFOAM is installed — meshes where a naive vertex-average centre would be visibly wrong
-- Graph edges are checked for consistency: displacements match node positions, normals are unit length and
-  point across every face, including on airFoil2D's curved, stretched cells, and a GNN forward pass runs on the output
-- Grid export: all 10,720 airFoil2D cell centres locate to their own cell; a linear field is reproduced to
-  ~1e-13 on every fluid pixel; the signed distance matches the closed form on the cavity exactly
-- Every cell's outward face-area vectors sum to zero (the divergence theorem), confirming closed, consistently
-  oriented cells
+Both need matplotlib.
 
 ```bash
-pip install -e ".[dev]"
-pytest                    # live OpenFOAM comparisons run automatically if OpenFOAM is on your PATH
+python examples/plot_grid.py path/to/case --wall walls --out grid.png
 ```
-
-## Roadmap
-
-- [x] Native ASCII reader for polyMesh and volume fields
-- [x] Mesh geometry matching OpenFOAM
-- [x] **Graph export** — cells as nodes, internal faces as edges, boundary patches tagged; NumPy `.npz` or PyG `Data`
-- [ ] Boundary-face nodes carrying boundary-condition values (inlet velocity, wall), for models that need them
-- [x] **Grid export for neural operators (2D)** — point location in true mesh cells, FV linear reconstruction,
-      mask and signed-distance channels, sampling back to the mesh
-- [ ] Grid export for 3D meshes
-- [ ] **Datasets** — a folder of cases (parameter sweeps) into one dataset, case parameters attached,
-      dataset-level normalisation statistics saved
-- [ ] CLI: `foam2ml convert ./cases --to pyg | grid`
-- [ ] Binary-format files, decomposed (parallel) cases, polyhedral meshes from snappyHexMesh
 
 ## License
 
