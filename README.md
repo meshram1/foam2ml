@@ -6,8 +6,35 @@ Every ML-for-CFD project ends up writing its own throwaway OpenFOAM reader. foam
 install instead: read a case directory directly (no `foamToVTK` step), get mesh geometry that agrees with
 OpenFOAM's own to rounding error, and export it in the shape your model expects.
 
-> **Status: early development (0.1.0.dev0).** The reader and mesh geometry work and are tested against OpenFOAM.
-> Graph and grid export are next — see the roadmap.
+![airFoil2D as a graph](docs/airfoil_graph.png)
+
+*OpenFOAM's airFoil2D tutorial through `to_graph()`: every cell is a node, every internal face an edge, and cells
+touching the wall are tagged. Right: the converged pressure field on the nodes. Made with
+[`examples/plot_graph.py`](examples/plot_graph.py).*
+
+> **Status: early development (0.1.0.dev0).** Reading, mesh geometry and graph export work and are tested
+> against OpenFOAM. Grid export for neural operators is next — see the roadmap.
+
+## Quickstart: a case to a PyTorch Geometric graph
+
+```python
+from foam2ml import to_graph
+
+g = to_graph("airFoil2D", fields=["U", "p"], params={"aoa": 4.0})
+g            # Graph(nodes=10720, edges=42508, x=['pos_x', 'pos_y', 'area', 'on_inlet', 'on_outlet', 'on_walls'],
+             #       y=['U_x', 'U_y', 'p'], edge_attr=['dx', 'dy', 'dist', 'length', 'n_x', 'n_y'], params={'aoa': 4.0})
+
+data = g.to_pyg()                 # torch_geometric.data.Data — ready for any PyG model
+g.save("case_000.npz")            # or keep it framework-free: plain NumPy arrays plus column names
+```
+
+- **Nodes** are cells. `x` holds the model's inputs — position, cell area/volume, and a 0/1 tag per boundary
+  patch — and `y` holds the fields you want to predict. Every column is named (`x_names`, `y_names`).
+- **Edges** are internal faces, both directions by default, with features `[d, distance, face length/area, unit normal]`.
+  Normals always point from source to target cell.
+- **2D meshes are handled properly.** OpenFOAM's 2D cases are one cell thick with an arbitrary depth; foam2ml
+  drops the out-of-plane axis and divides by the depth, so areas and face lengths don't depend on a meaningless number.
+- PyTorch is optional: `pip install "foam2ml[pyg]"` only if you want `to_pyg()`.
 
 ## What works today
 
@@ -43,6 +70,8 @@ The test suite compares against **OpenFOAM's own output**, not against itself:
   on the lid-driven cavity, which ships with the tests
 - The same comparison runs live on the graded **pitzDaily** mesh and the curved, stretched **airFoil2D** mesh
   when OpenFOAM is installed — meshes where a naive vertex-average centre would be visibly wrong
+- Graph edges are checked for consistency: displacements match node positions, normals are unit length and
+  point across every face, including on airFoil2D's curved, stretched cells, and a GNN forward pass runs on the output
 - Every cell's outward face-area vectors sum to zero (the divergence theorem), confirming closed, consistently
   oriented cells
 
@@ -55,8 +84,8 @@ pytest                    # live OpenFOAM comparisons run automatically if OpenF
 
 - [x] Native ASCII reader for polyMesh and volume fields
 - [x] Mesh geometry matching OpenFOAM
-- [ ] **Graph export** — PyTorch Geometric `Data`: cells as nodes, internal faces as edges with
-      `[dx, dy, (dz), distance, face area, face normal]`, boundary cells tagged by patch type
+- [x] **Graph export** — cells as nodes, internal faces as edges, boundary patches tagged; NumPy `.npz` or PyG `Data`
+- [ ] Boundary-face nodes carrying boundary-condition values (inlet velocity, wall), for models that need them
 - [ ] **Grid export for neural operators** — resample onto a regular grid with a geometry mask channel,
       so an FNO can tell solid from fluid
 - [ ] **Datasets** — a folder of cases (parameter sweeps) into one dataset, case parameters attached,
